@@ -1,22 +1,16 @@
 # Bibliotecas
-
 import pandas as pd
-
 import numpy as np
-
 import seaborn as sns
-
 import matplotlib.pyplot as plt
 
-from sklearn.preprocessing import LabelEncoder
-
 from sklearn.model_selection import train_test_split
-
-from xgboost import XGBRegressor
-
-from sklearn.model_selection import RandomizedSearchCV, KFold
-
+from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_squared_error
+
+from sklearn.ensemble import RandomForestRegressor
+from lightgbm import LGBMRegressor
+from xgboost import XGBRegressor
 
 #%% Importando Data Frame
 
@@ -58,13 +52,15 @@ plt.figure(figsize=(20,10))
 sns.heatmap(df.isnull())
 plt.show()
 
-#%% Vamos tratar os nulls
+#%% Vamos tratar os nulls do teste e do treinamento
 
 # Preencher valores ausentes em colunas numéricas com a média
 df.fillna(df.select_dtypes(include=['number']).mean(), inplace=True)
+test.fillna(test.select_dtypes(include=['number']).mean(), inplace=True)
 
 # Preencher valores ausentes em colunas categóricas com 'Desconhecido'
 df.fillna(df.select_dtypes(include=['object']).mode().iloc[0], inplace=True)
+test.fillna(test.select_dtypes(include=['object']).mode().iloc[0], inplace=True)
 
 #%% verificar se possui valores duplicados
 
@@ -72,45 +68,75 @@ df.fillna(df.select_dtypes(include=['object']).mode().iloc[0], inplace=True)
 duplicados = df.duplicated()
 print(duplicados)
 
-#%% Tranformando as variaveis em numeros
-df_n = df
+#%% Separando em variaveis e targuet 
+X = df.drop(columns=['Price'])
+y = df['Price']
 
-label_encoder = LabelEncoder()
+#%% Aplicando One-Hot Encoding
+# Concatenando treino e teste 
+X_total = pd.concat([X, test], axis=0)
+
+# Aplicando One-Hot Encoding no conjunto completo
+X_encoded_total = pd.get_dummies(X_total)
 
 
-for col in df_n.select_dtypes(include=['object']).columns:
-    df_n[col] = label_encoder.fit_transform(df_n[col])
+# Separando novamente em treino e teste, garantindo as mesmas colunas
+X_encoded_test = X_encoded_total.iloc[len(X):, :].reindex(columns=X_encoded_total.iloc[:len(X), :].columns, fill_value=0)
+X_encoded = X_encoded_total.iloc[:len(X), :]
 
-# Exibindo o DataFrame transformado
-print(df_n.head())
+#%% Dividindo os dados em Treino e validação
 
-#%% Vizualização dos dados
+X_train, X_val, y_train, y_val = train_test_split(X_encoded, y, test_size=0.2, random_state=42)
 
-#Vamos criar a variavel "Target" que é nossa resposta, para analizar quais variaveis estão mais relacionadas
-target = df['Price']
+#%% Normalização
+scaler = StandardScaler()
+X_train_scaled = scaler.fit_transform(X_train)
+X_val_scaled = scaler.transform(X_val)
+X_encoded_test_scaled = scaler.transform(X_encoded_test)
 
-# Calcula a matriz de correlação
-corr_matrix = df_n.corr()
+#%% Criando os modelos
 
-# Plota uma matriz com as correlações
-corr_matrix = df_n.corr()
-plt.figure(figsize=(15, 10))
-sns.heatmap(corr_matrix, 
-            annot=True, 
-            linewidths=0.5, 
-            fmt= ".2f", 
-            cmap="YlGnBu");
-# A matrix não apresnta forte correlações
+modelos = {
+    "XGBoost": XGBRegressor( device='cpu', max_depth=5, n_estimators= 1000, learning_rate=0.015, random_state=42),
+    "RandomForest": RandomForestRegressor(n_estimators=100, max_depth=5, random_state=42),
+    "LightGBM": LGBMRegressor(n_estimators=100, learning_rate=0.015, max_depth=5, random_state=42)           
+}
 
-#%%
-fig,ax=plt.subplots(4,2,figsize=(20,20))
-ax=ax.flatten()
-i=0
-for col in df.columns[df.dtypes=='object']:
-    if col !='Brand':
-        sns.countplot(data=df,x=col,ax=ax[i],hue='Brand')
-        i+=1
-sns.countplot(data=df,x='Compartments',ax=ax[i],hue='Brand')
-ax[7].axis('off')
-plt.tight_layout()
+resultados = {}
+#%% Treinando os modelos
+
+for nome, modelo in modelos.items():
+    print(f"\nTreinando {nome}...")
+    modelo.fit(X_train, y_train)
+    y_pred = modelo.predict(X_val)
+    rmse = np.sqrt(mean_squared_error(y_val, y_pred))
+    resultados[nome] = rmse
+    print(f'{nome} - RMSE: {rmse: .04f}')
+    
+    
+#%%Resultados
+melhor_modelo = min(resultados, key=resultados.get)
+print(f'\nMelhor modelo: {melhor_modelo} com RMSE de {resultados[melhor_modelo]:.4f}')
+
+#%% Vizualização dos Resultados
+
+plt.figure(figsize=(8, 6))
+sns.barplot(x=list(resultados.keys()), y=list(resultados.values()))
+plt.title('RMSE dos Modelos')
+plt.ylabel('RMSE')
 plt.show()
+
+#%% Executando a previsão com os dados de test
+""" Agora Sabemos que o modelo XGBoost teve menor taxa de erro, então vamos executalo na base de dados de teste
+ fornecida pelo kaggle para contruir o arquivo que sera enviado para competição, para isso temos que fazer o mesmo tratamento de dados
+ que foi feito para a base de treino na base de test"""
+ 
+ 
+#%% Agora vamos prever utilizando o modelo do XGBoost
+
+y_pred_test = modelos[melhor_modelo].predict(X_encoded_test_scaled)
+
+#%%Salvando par subir no kaggle
+
+submission = pd.DataFrame({'id': test['id'], 'Price': y_pred_test})
+submission.to_csv('submission.csv', index=False)
